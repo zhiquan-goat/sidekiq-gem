@@ -123,6 +123,18 @@ RSpec.describe SidekiqRuntime::ClientPushBoundary do
     expect(events).to be_empty
   end
 
+  it 'does not observe a runtime-conflict continuation after ScheduledSet removes at' do
+    client.push_result = 'scheduled-jid'
+    continuation = SidekiqUniqueness.mark_runtime_conflict_continuation(job_item)
+
+    events, result = capture_push_events do
+      client.push(continuation)
+    end
+
+    expect(result).to eq('scheduled-jid')
+    expect(events).to be_empty
+  end
+
   it 'does not record success when the transactional wrapper only registers its callback' do
     raw_push_completed = false
     chain = Sidekiq::Middleware::Chain.new(Sidekiq.default_configuration)

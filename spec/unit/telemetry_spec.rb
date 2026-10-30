@@ -35,4 +35,14 @@ RSpec.describe SidekiqRuntime::Telemetry do
     expect { described_class.perform(payload, queue: 'observed') { raise failure } }
       .to raise_error { |error| expect(error).to equal(failure) }
   end
+
+  it 'does not prevent lock construction or mutation when its event fields fail' do
+    unique = SidekiqUniqueness.snapshot(job_class: 'ObservedJob', queue: 'observed', identity: [1],
+      enqueue_ttl: 30, runtime_ttl: 10, key_prefix: "spec:telemetry:#{SecureRandom.hex(6)}")
+    allow(described_class).to receive(:fields).and_raise('unavailable telemetry')
+    lock = SidekiqUniqueness.lock_for(job_payload: payload.merge('sidekiq_runtime' => {'uniqueness' => unique}), physical_queue: 'observed')
+    redis = double('Redis')
+    expect(redis).to receive(:call).once.and_return(1)
+    expect(lock.reserve_enqueue(redis: redis, owner: 'observed-jid')).to be true
+  end
 end

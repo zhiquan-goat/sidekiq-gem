@@ -61,6 +61,7 @@ RSpec.describe SidekiqRuntime::ClientPushBoundary, 'native producer contract' do
   end
 
   it 'keeps ordinary bulk on Sidekiq raw_push with its native result shape' do
+    expect(SidekiqUniqueness::AtomicEnqueue).not_to receive(:new)
     expect(client).to receive(:raw_push).with(an_instance_of(Array)).twice.and_call_original
     results = client.push_bulk(
       'class' => ordinary_job,
@@ -74,13 +75,13 @@ RSpec.describe SidekiqRuntime::ClientPushBoundary, 'native producer contract' do
     expect(ready_payloads.map { |payload| payload['class'] }).to all(eq('SpecBoundaryOrdinaryJob'))
   end
 
-  it 'rejects retry_queue on single and bulk retry writes' do
+  it 'rejects retry_queue on single and bulk retry or continuation writes' do
     [ordinary_job].each do |klass|
-      [{'retry_count' => 0}].each do |markers|
+      [{'retry_count' => 0}, SidekiqUniqueness.mark_runtime_conflict_continuation({})].each do |markers|
         item = {'class' => klass, 'queue' => queue, 'args' => [9], 'retry_queue' => 'elsewhere'}.merge(markers)
         expect { client.push(item) }.to raise_error(ArgumentError, /retry_queue/)
         expect { client.push_bulk(item.merge('args' => [[9], [10]])) }
-          .to raise_error(ArgumentError, /retry_queue/)
+          .to raise_error(ArgumentError, /retry_queue|Unique push_bulk/)
       end
     end
     expect(ready_payloads).to be_empty

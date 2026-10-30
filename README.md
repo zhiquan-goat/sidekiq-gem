@@ -8,7 +8,8 @@ reliable fetching, and process-heartbeat recovery.
 Native producer/server installation, final queue validation, management retries
 and atomic scheduled promotion are available. Optional Active Job integration
 includes serialization, physical queue routing and confirmed retry writes.
-Uniqueness enters in PR-06 of the seven-part runtime stack.
+Optional Active Job uniqueness now includes atomic admission, execution ownership,
+conflict continuations and owner-safe cleanup.
 
 ## Storage and queues
 
@@ -145,6 +146,81 @@ enqueue callbacks, transaction deferral or batch atomicity.
 `retry_unconfirmed` and `failed`. These events describe AJ execution; observer
 failures do not confirm retry writes or control Redis ACK.
 
+## Uniqueness and retry lifecycle
+
+Active Job declares the single `until_and_while_executing` policy with:
+
+```ruby
+class RefreshProductJob < ActiveJob::Base
+  self.queue_adapter = :sidekiq_runtime
+  queue_as :products
+  runtime_uniqueness enqueue_ttl: 24.hours, runtime_ttl: 60.seconds,
+                     key: ->(job) { job.arguments.first }
+end
+```
+
+The key may return one stable business value; it does not have to return an Array.
+For a GlobalID argument, prefer an immutable key such as `job.arguments.first.id`.
+AJ serializes the key as a one-element identity Array. Choose stable identity
+fields, not request time, trace fields, redelivery flags or mutable model data.
+A class that declares this enhancement and chooses an unsupported adapter such
+as `:resque` raises before enqueue, including AJ bulk grouping. Plain jobs may
+still choose another adapter.
+
+Only Active Job exposes custom uniqueness. Native Sidekiq Jobs use ordinary
+enqueue, execution, Retry and Dead behavior. Use `runtime_uniqueness` on Active
+Job for the scope **business Job class + physical queue + one identity**.
+Enqueue and execution have separate keys and TTLs for that same identity.
+
+The snapshot lives in `sidekiq_runtime.uniqueness` alongside `redelivered` on the
+Sidekiq transport payload. It contains `job_class`, `queue`, serialized `identity`,
+the scoped `key_prefix`, and both TTLs. AJ also carries this metadata at
+`args[0].sidekiq_runtime` so `Base.execute` and later self-retries preserve it.
+The outer transport copy is authoritative: `JobMetadata.with_redelivery` updates
+both copies, and server middleware synchronizes the AJ copy before execution.
+No business argument is added or rewritten. Do not edit this internal metadata.
+
+Uniqueness does not impose a retry or Dead retention policy. Native `retry: false`,
+`retry: 0`, and `dead: false` retain Sidekiq's meanings; no reliability policy is
+silently upgraded. The AJ wrapper keeps its one default `retry: 0, dead: true`.
+
+The policy is `until_and_while_executing`, not uniqueness until terminal success:
+
+| Phase | Reservation behavior |
+|---|---|
+| Initial Ready or Scheduled enqueue | One atomic write stores the payload and an enqueue lock owned by its JID. While that lock is valid, a new submission for the same identity is filtered, even if it supplies the same JID. |
+| Execution start | The worker first acquires a per-attempt runtime owner token, then deletes the enqueue lock only if the current JID still owns it. After Job A releases its reservation, Job B may be accepted. While B owns the new reservation, Job C is filtered, and A's later Success or Dead cleanup does not remove B's lock. |
+| Success or ordinary failure | The runtime token is released. A native Retry or an AJ self-retry waits without creating or extending an enqueue reservation, so a new same-identity Job may be accepted. AJ retries preserve the snapshot and use only the current in-memory retry request to select this path; `redelivered` and matching `job_id` are not retry admission signals. |
+| Sidekiq shutdown | Before releasing its runtime token, the current JID attempts to restore its own enqueue reservation for the Inflight/Ready handoff. Restoration can fail when another JID owns the reservation or Redis is unavailable. |
+| Runtime-lock conflict | Stores a same-JID Scheduled continuation delayed by `runtime_ttl + 1` seconds without entering business `perform`, increasing AJ `executions`, or changing redelivery. Its enqueue reservation is created when absent, refreshed when owned by that JID, and left unchanged when owned by another JID. This is not an ordinary Sidekiq Retry. When the runtime TTL expires, concurrent execution can occur. |
+
+The enqueue lock for a Scheduled unique job lasts for `configured_enqueue_ttl + ceil(max(scheduled_at - enqueue_time, 0))` seconds. The configured TTL is therefore the duplicate-filtering window *after* the scheduled time, if the job is promoted on time. A longer actual queue wait can outlive that window. Runtime locks also have TTLs and do not guarantee one instance for an arbitrarily long job. Business idempotency remains the Job's responsibility.
+
+Active Job unique enqueues do not support `Sidekiq::Testing.fake!` or
+`Sidekiq::Testing.inline!`. They raise `ArgumentError` before client middleware or
+Redis persistence. Use `Sidekiq::Testing.disable!` with a dedicated Redis instance
+for uniqueness tests. Ordinary jobs retain Sidekiq's fake/inline behavior.
+
+## Management API support
+
+| Operation | Contract |
+|---|---|
+| Inflight `recover_orphan` | Exact atomic owner-heartbeat recheck; alive/unknown state never permits takeover. Same recovery budget/Dead policy as automatic recovery. |
+| Runtime Poller promotion from Scheduled or Retry | Supported. The exact source member moves atomically to Ready without producer middleware or identity evaluation. Retry promotion adds redelivery metadata; Scheduled promotion preserves it. |
+| `SortedEntry#add_to_queue` or `#retry` for a unique AJ Scheduled entry | Rejected before Sidekiq removes the source, even for a unique AJ retry in Scheduled. Let the runtime Poller promote it when due. Ordinary Scheduled entries retain native behavior. |
+| `ScheduledSet#retry_all` / inherited bulk Ruby management APIs | Outside the runtime management contract. They bypass the per-entry guard and metadata boundary; applications must not expose them. No all-or-nothing management batch is promised. |
+| Per-entry native Retry or Dead `#retry` / `#add_to_queue` | Supported for native/AJ envelopes. Mark redelivery and preserve the original identity; bypass fresh reservation admission through this explicit boundary, including entries without `retry_count`. `#retry` decrements an existing counter as upstream does; no counter is fabricated. |
+| Official Dead Delete | Supported native deletion. It does not release runtime locks or delete a newer job's reservation. |
+| Queue or SortedEntry delete; Queue/SortedSet clear | Native data operations only. Enqueue/runtime locks are not repaired or removed; an orphaned reservation can remain until TTL expiry. |
+| SortedEntry reschedule | Native score change only. The original reservation TTL is not extended/recomputed; postponing beyond it can admit duplicates before due time. |
+
+Per-entry Retry/Dead management retains Sidekiq's **non-atomic remove-then-push**
+semantics. Middleware rejection or Redis failure after removal can lose the
+source; metadata wiring does not turn this into an atomic runtime move. Manual
+retry does not create/extend a reservation and cannot clear a newer JID's lock.
+Direct Redis writes or user-supplied retry/continuation markers are not supported
+ways to bypass admission.
+
 ## Metadata and events
 
 `JobMetadata` keeps delivery facts under `sidekiq_runtime`, separate from business
@@ -213,3 +289,17 @@ GOAT_RUNTIME_TEST_REDIS_URL=redis://127.0.0.1:17779/15 \
   spec/contracts/active_job_execution_contract_spec.rb \
   spec/contracts/active_job_queue_routing_contract_spec.rb
 ```
+
+Verify the complete uniqueness lifecycle (with the same dedicated test Redis):
+
+```sh
+GOAT_RUNTIME_TEST_REDIS_URL=redis://127.0.0.1:17779/15 \
+  bundle exec rspec spec/unit/atomic_enqueue_spec.rb \
+  spec/redis/atomic_enqueue_redis_contract_spec.rb \
+  spec/unit/until_and_while_executing_spec.rb spec/unit/server_middleware_spec.rb \
+  spec/unit/death_handler_spec.rb spec/contracts/active_job_uniqueness_contract_spec.rb \
+  spec/contracts/uniqueness_testing_mode_contract_spec.rb
+```
+
+All production runtime components are now present. Real-process acceptance and
+its CLI/Redis fixtures enter in PR-07 of this runtime stack.

@@ -25,6 +25,9 @@ module SidekiqRuntime
       config.server_middleware do |chain|
         chain.add(SidekiqRuntime::ServerMiddleware)
       end
+      unless config.death_handlers.any? { |handler| handler.is_a?(SidekiqUniqueness::DeathHandler) }
+        config.death_handlers << SidekiqUniqueness::DeathHandler.new(config)
+      end
       reclaimer = OrphanReclaimer.new(config, settings: recovery)
       config.on(:startup) do
         validate!(config)
