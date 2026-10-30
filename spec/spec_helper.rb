@@ -18,6 +18,7 @@ SidekiqRuntime::QueueKeys.configure!(
   SidekiqRuntime::Storage.new(namespace: 'srt:test:v1')
 )
 SidekiqRuntime.event_handler = ->(event, payload) { ActiveSupport::Notifications.instrument(event, payload) }
+SidekiqRuntime.install_producer!(storage: SidekiqRuntime::QueueKeys.storage)
 
 require_relative 'sidekiq_runtime_spec_support'
 
