@@ -22,6 +22,9 @@ module SidekiqRuntime
       config.redis = redis_config
       config[:fetch_class] = ReliableFetch
       config[:scheduled_enq] = AtomicScheduledEnqueuer
+      config.server_middleware do |chain|
+        chain.add(SidekiqRuntime::ServerMiddleware)
+      end
       reclaimer = OrphanReclaimer.new(config, settings: recovery)
       config.on(:startup) do
         validate!(config)
@@ -62,7 +65,15 @@ module SidekiqRuntime
           fetcher.stores_by_queue.keys == queues
         raise ArgumentError, 'Sidekiq runtime default capsule must use reliable fetch for its configured queues'
       end
+      unless middleware?(capsule.server_middleware, SidekiqRuntime::ServerMiddleware)
+        raise ArgumentError, 'Sidekiq runtime default capsule requires runtime server middleware'
+      end
     end
     private_class_method :validate_capsule!
+
+    def self.middleware?(chain, middleware)
+      chain.any? { |entry| entry.klass == middleware }
+    end
+    private_class_method :middleware?
   end
 end

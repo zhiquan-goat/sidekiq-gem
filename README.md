@@ -6,8 +6,9 @@ These components provide storage naming, queue discovery, explicit Redis pool
 scoping, delivery metadata, telemetry, atomic claims, shared queue rate limits,
 reliable fetching, and process-heartbeat recovery.
 Native producer/server installation, final queue validation, management retries
-and atomic scheduled promotion are available. ActiveJob integration and uniqueness
-enter in PR-05 and PR-06 of the seven-part runtime stack.
+and atomic scheduled promotion are available. Optional Active Job integration
+includes serialization, physical queue routing and confirmed retry writes.
+Uniqueness enters in PR-06 of the seven-part runtime stack.
 
 ## Storage and queues
 
@@ -95,6 +96,55 @@ Final producer persistence validates queue names and rejects `retry_queue`.
 without rerunning producer middleware. Retry/Dead management operations preserve
 Sidekiq's remove-then-push semantics and their original physical queue.
 
+## Optional Active Job adapter
+
+Applications using Active Job 7.2.3.1 can load the optional adapter:
+
+```ruby
+require 'goat_sidekiq_runtime/active_job'
+
+class RefreshProductJob < ActiveJob::Base
+  self.queue_adapter = :sidekiq_runtime
+  self.enqueue_after_transaction_commit = :default
+  queue_as :products
+  retry_on Timeout::Error, wait: 10, attempts: 2
+  discard_on ActiveJob::DeserializationError
+
+  def perform(product_id)
+    Products.refresh(product_id, reconcile: execution_context.redelivered?)
+  end
+end
+```
+
+Keep the producer/server installation above. The wrapper delegates serialization,
+callbacks, retries and discard decisions to Active Job, with native Sidekiq
+`retry: 0, dead: true`. AJ retries normally enter Scheduled; an unhandled final
+exception enters Dead. The logical `job_id` survives retries, while
+`provider_job_id` identifies the accepted Sidekiq delivery. The immutable
+`execution_context.redelivered?` distinguishes known retries/recovery from first
+submissions and newly created child jobs.
+
+AJ owns after-commit deferral when Rails installs its integration. The adapter
+uses a direct Sidekiq client so a preallocated transactional JID cannot confirm a
+retry write. Each self-retry must receive an actual write acknowledgement before
+the wrapper returns. Callback cancellation, rejected writes, pending/rolled-back
+transactions and caught transport exceptions leave the retry unconfirmed and
+raise `SidekiqRuntime::ActiveJob::RetryPersistenceError`. Sidekiq retains a Dead
+failure, or the exact Inflight claim if failure persistence also fails. Unknown
+writes and late commits can create duplicates; delivery remains at-least-once.
+The contract tests probe framework deferral APIs without booting Rails or a real
+database transaction.
+
+Client middleware may route ordinary AJ jobs from their logical `queue_name` to
+a physical queue. Self-retries are validated after middleware and must return to
+the consumed physical queue. Ordinary bulk enqueue keeps per-job results without
+enqueue callbacks, transaction deferral or batch atomicity.
+
+`sidekiq.notification.active_job_finished` reports execution outcomes including
+`succeeded`, `retry_scheduled`, `discarded`, `retry_exhausted`, `handled`, `aborted`,
+`retry_unconfirmed` and `failed`. These events describe AJ execution; observer
+failures do not confirm retry writes or control Redis ACK.
+
 ## Metadata and events
 
 `JobMetadata` keeps delivery facts under `sidekiq_runtime`, separate from business
@@ -153,4 +203,13 @@ GOAT_RUNTIME_TEST_REDIS_URL=redis://127.0.0.1:17779/15 \
   spec/contracts/processor_diagnostics_contract_spec.rb \
   spec/contracts/processor_reliable_fetch_contract_spec.rb \
   spec/contracts/sorted_entry_guard_contract_spec.rb
+```
+
+Verify ordinary Active Job enqueue, execution and physical retry routing:
+
+```sh
+GOAT_RUNTIME_TEST_REDIS_URL=redis://127.0.0.1:17779/15 \
+  bundle exec rspec spec/contracts/active_job_adapter_contract_spec.rb \
+  spec/contracts/active_job_execution_contract_spec.rb \
+  spec/contracts/active_job_queue_routing_contract_spec.rb
 ```
