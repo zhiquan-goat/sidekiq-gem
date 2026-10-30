@@ -34,6 +34,7 @@ RSpec.describe SidekiqRuntime::ServerConfigurator do
     expect(config.concurrency).to eq(3)
     expect(config[:fetch_class]).to eq(SidekiqRuntime::ReliableFetch)
     expect(config[:scheduled_enq]).to eq(SidekiqRuntime::AtomicScheduledEnqueuer)
+    expect(config.server_middleware.map(&:klass)).to eq([SidekiqRuntime::ServerMiddleware])
     expect(config.client_middleware.map(&:klass))
       .to eq([before_runtime, after_runtime])
     expect(Sidekiq::SortedEntry.ancestors.count(SidekiqRuntime::SortedEntryGuard)).to eq(1)
@@ -79,6 +80,41 @@ RSpec.describe SidekiqRuntime::ServerConfigurator do
     expect { config[:lifecycle_events].fetch(:startup).first.call }
       .to raise_error(ArgumentError, /default capsule/)
     expect(config.default_capsule.fetcher).to equal(fetcher)
+  end
+
+  it 'rejects required capsule middleware cached before installation' do
+    config = config_for(['sneakers_common'])
+    config.default_capsule.server_middleware
+    SidekiqRuntime.install_server!(config, redis_config: redis_config,
+      storage: SidekiqRuntime::QueueKeys.storage)
+
+    expect { described_class.validate!(config) }.to raise_error(ArgumentError, /middleware/)
+  end
+
+  it 'rejects required capsule middleware removed after installation' do
+    config = config_for(['sneakers_common'])
+    SidekiqRuntime.install_server!(config, redis_config: redis_config,
+      storage: SidekiqRuntime::QueueKeys.storage)
+    config.default_capsule.server_middleware.remove(SidekiqRuntime::ServerMiddleware)
+
+    expect { described_class.validate!(config) }.to raise_error(ArgumentError, /middleware/)
+  end
+
+  it 'allows early global chain access and additional middleware' do
+    client_middleware = Class.new
+    server_middleware = Class.new
+    config = config_for(['sneakers_common'])
+    config.client_middleware { |chain| chain.add(client_middleware) }
+    config.server_middleware { |chain| chain.add(server_middleware) }
+
+    SidekiqRuntime.install_server!(config, redis_config: redis_config,
+      storage: SidekiqRuntime::QueueKeys.storage)
+
+    expect(described_class.validate!(config)).to be true
+    expect(config.default_capsule.client_middleware.map(&:klass))
+      .to contain_exactly(client_middleware)
+    expect(config.default_capsule.server_middleware.map(&:klass))
+      .to contain_exactly(server_middleware, SidekiqRuntime::ServerMiddleware)
   end
 
   it 'rejects recovery settings replacement after installation or after fetcher construction' do
