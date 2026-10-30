@@ -3,7 +3,8 @@
 Shared runtime components for Sidekiq OSS 7.3.10. Requires Ruby 3.4.7 or later.
 
 These components provide storage naming, queue discovery, explicit Redis pool
-scoping, delivery metadata, telemetry, atomic claims, and shared queue rate limits.
+scoping, delivery metadata, telemetry, atomic claims, shared queue rate limits,
+reliable fetching, and process-heartbeat recovery.
 Producer and server installation will be introduced in PR-04 of the seven-part
 runtime stack.
 
@@ -29,7 +30,7 @@ once before using runtime components.
 sorted set and records each claim's process owner. ACK and requeue check the
 exact claim and owner; orphan reclaim also checks that the owner's native Sidekiq
 heartbeat has disappeared. Ambiguous Redis replies propagate without replaying
-the transition. Fetching and automatic recovery arrive in PR-03.
+the transition.
 
 `QueueRateLimit` manages a token bucket shared by consumers of one physical queue
 within the runtime namespace and Redis database. Claims spend tokens in the same
@@ -43,6 +44,29 @@ limiter.enable('critical', rate: 2.5, burst: 3)
 limiter.get('critical')
 limiter.disable('critical')
 ```
+
+## Reliable fetching and recovery
+
+`ReliableFetch.new(capsule)` supports Sidekiq's strict, weighted and random queue
+modes. Its `UnitOfWork` acknowledges the exact claim or requeues it on shutdown
+with redelivery metadata. Shutdown does not spend the crash recovery budget;
+unknown Redis results are reported without replaying the operation.
+
+`ProcessorBoundary` tracks claims held during processor work and reports an
+unconfirmed release for manual review. A living owner's heartbeat never
+authorizes automatic recovery, even for a long-running job.
+
+`OrphanReclaimer` scans the persistent queue directory and claims in bounded
+batches. Recovery atomically rechecks the native Sidekiq process heartbeat,
+preserves original arguments and routing, and increments `recovery_count`.
+Malformed envelopes and exhausted recovery budgets move to Dead.
+
+`InflightCollection.new(config: sidekiq_config)` discovers reliable queues for
+bounded browsing, ownership diagnostics and explicit orphan recovery. Displayed
+state is informational; every recovery rechecks ownership and heartbeat in Redis.
+
+These components can be constructed explicitly. Producer/server installation and
+processor registration are introduced together in PR-04.
 
 ## Metadata and events
 
@@ -76,4 +100,15 @@ With that dedicated test Redis running, verify the claim protocol and rate limit
 GOAT_RUNTIME_TEST_REDIS_URL=redis://127.0.0.1:17779/15 \
   bundle exec rspec spec/unit/inflight_store_spec.rb \
   spec/redis/queue_rate_limit_redis_contract_spec.rb
+```
+
+Verify fetching, recovery, heartbeat ownership and terminal races:
+
+```sh
+GOAT_RUNTIME_TEST_REDIS_URL=redis://127.0.0.1:17779/15 \
+  bundle exec rspec spec/unit/reliable_fetch_spec.rb \
+  spec/unit/recovery_spec.rb spec/unit/recovery_state_spec.rb \
+  spec/unit/inflight_collection_spec.rb \
+  spec/redis/process_heartbeat_contract_spec.rb \
+  spec/redis/safety_terminal_race_spec.rb
 ```

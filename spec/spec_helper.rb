@@ -7,7 +7,6 @@ require 'active_support/notifications'
 require 'active_support/core_ext/numeric/time'
 require 'active_support/core_ext/object/inclusion'
 require 'goat_sidekiq_runtime'
-require 'sidekiq/capsule'
 
 redis_url = URI(ENV.fetch('GOAT_RUNTIME_TEST_REDIS_URL', 'redis://127.0.0.1:17779/15'))
 unless %w[127.0.0.1 localhost ::1 [::1]].include?(redis_url.host) && redis_url.port != 6379
