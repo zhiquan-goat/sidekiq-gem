@@ -1,0 +1,20 @@
+AllCops:
+  CacheRootDirectory: .rubocop_cache
+  DisabledByDefault: true
+  NewCops: enable
+  SuggestExtensions: false
+  TargetRubyVersion: 3.4
+  Exclude:
+    - 'artifacts/**/*'
+    - 'spec/**/*'
+    - 'vendor/**/*'
+
+Lint:
+  Enabled: true
+
+# These checks flag intentional, already contract-tested runtime shapes rather than defects.
+Lint/AmbiguousOperatorPrecedence:
+  Enabled: false
+
+Lint/DuplicateBranch:
+  Enabled: false
