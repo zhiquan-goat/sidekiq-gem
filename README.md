@@ -2,9 +2,10 @@
 
 Shared runtime components for Sidekiq OSS 7.3.10. Requires Ruby 3.4.7 or later.
 
-This foundation provides storage naming, queue discovery, explicit Redis pool
-scoping, delivery metadata, and telemetry. Producer and server installation will
-be introduced in PR-04 of the seven-part runtime stack.
+These components provide storage naming, queue discovery, explicit Redis pool
+scoping, delivery metadata, telemetry, atomic claims, and shared queue rate limits.
+Producer and server installation will be introduced in PR-04 of the seven-part
+runtime stack.
 
 ## Storage and queues
 
@@ -22,9 +23,26 @@ immutable namespace; queue discovery combines configured queues, Sidekiq's nativ
 queue set, and the runtime's persistent queue directory. Configure the namespace
 once before using runtime components.
 
-The upcoming claim protocol will associate each delivery with a claim and a
-process owner so that recovery can distinguish stale acknowledgements. Atomic
-claim transitions arrive in PR-02, with fetching and recovery in PR-03.
+## Claims and queue rate limits
+
+`InflightStore` protocol 3 atomically moves Ready jobs into a persistent Inflight
+sorted set and records each claim's process owner. ACK and requeue check the
+exact claim and owner; orphan reclaim also checks that the owner's native Sidekiq
+heartbeat has disappeared. Ambiguous Redis replies propagate without replaying
+the transition. Fetching and automatic recovery arrive in PR-03.
+
+`QueueRateLimit` manages a token bucket shared by consumers of one physical queue
+within the runtime namespace and Redis database. Claims spend tokens in the same
+Lua script as the Ready-to-Inflight move. Empty queues spend no tokens; a denied
+claim returns `InflightStore::RateLimited` and leaves Ready and ownership intact.
+Queues are unlimited until a policy is enabled.
+
+```ruby
+limiter = SidekiqRuntime::QueueRateLimit.new(sidekiq_config)
+limiter.enable('critical', rate: 2.5, burst: 3)
+limiter.get('critical')
+limiter.disable('critical')
+```
 
 ## Metadata and events
 
@@ -52,3 +70,10 @@ gem build goat_sidekiq_runtime.gemspec
 The test helper restricts Redis to a dedicated loopback endpoint outside port
 6379 (`GOAT_RUNTIME_TEST_REDIS_URL`, default `redis://127.0.0.1:17779/15`). The
 foundation examples use doubles and pool scoping and do not issue Redis commands.
+With that dedicated test Redis running, verify the claim protocol and rate limits:
+
+```sh
+GOAT_RUNTIME_TEST_REDIS_URL=redis://127.0.0.1:17779/15 \
+  bundle exec rspec spec/unit/inflight_store_spec.rb \
+  spec/redis/queue_rate_limit_redis_contract_spec.rb
+```
