@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+SIDEKIQ_REDIS_URL="${GOAT_RUNTIME_TEST_REDIS_URL:-redis://127.0.0.1:17779/15}"
+export SIDEKIQ_REDIS_URL
+ruby -ruri -e 'url = URI(ENV.fetch("SIDEKIQ_REDIS_URL")); abort "dedicated loopback Redis URL required" unless %w[127.0.0.1 localhost ::1 [::1]].include?(url.host) && url.port != 6379'
+
+case "${1:-specs}" in
+  specs)
+    shift || true
+    exec bundle exec rspec spec/unit spec/redis spec/contracts "$@"
+    ;;
+  process)
+    shift
+    export SIDEKIQ_RUNTIME_PROCESS_ACCEPTANCE=1
+    exec bundle exec rspec spec/process/process_acceptance_spec.rb "$@"
+    ;;
+  process-worker)
+    shift
+    exec bundle exec sidekiq -r "$PWD/spec/fixtures/cli_boot.rb" "$@"
+    ;;
+  redis-probe)
+    shift
+    exec bundle exec ruby spec/fixtures/redis_probe.rb "$@"
+    ;;
+  *) echo 'usage: bin/test {specs|process|process-worker|redis-probe}' >&2; exit 2 ;;
+esac
