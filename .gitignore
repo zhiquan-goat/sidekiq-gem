@@ -1,0 +1,7 @@
+/.bundle/
+/.rubocop_cache/
+/artifacts/
+/pkg/
+/vendor/bundle/
+/*.gem
+.rspec_status
