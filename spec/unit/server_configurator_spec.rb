@@ -37,6 +37,7 @@ RSpec.describe SidekiqRuntime::ServerConfigurator do
     expect(config.server_middleware.map(&:klass)).to eq([SidekiqRuntime::ServerMiddleware])
     expect(config.client_middleware.map(&:klass))
       .to eq([before_runtime, after_runtime])
+    expect(config.death_handlers.map(&:class)).to eq([SidekiqUniqueness::DeathHandler])
     expect(Sidekiq::SortedEntry.ancestors.count(SidekiqRuntime::SortedEntryGuard)).to eq(1)
     expect(config[:lifecycle_events].fetch(:startup).first.call).to be true
     config[:lifecycle_events].fetch(:shutdown).each(&:call)

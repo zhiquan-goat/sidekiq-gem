@@ -7,8 +7,22 @@ module SidekiqRuntime
         @runtime_execution_context ||= ExecutionContext.new
       end
 
+      def queue_adapter
+        adapter = super
+        if runtime_uniqueness_options && !adapter.is_a?(::ActiveJob::QueueAdapters::SidekiqRuntimeAdapter)
+          raise ArgumentError, 'runtime_uniqueness requires the sidekiq_runtime adapter'
+        end
+        adapter
+      end
+
       def serialize
         metadata = (@runtime_metadata ||= {'redelivered' => execution_context.redelivered?})
+        if runtime_uniqueness_options && !metadata.key?('uniqueness')
+          options = runtime_uniqueness_options
+          identity = ::ActiveJob::Arguments.serialize([options.fetch(:key).call(self)])
+          metadata['uniqueness'] = SidekiqUniqueness.snapshot(job_class: self.class.name, queue: queue_name,
+            identity: identity, enqueue_ttl: options.fetch(:enqueue_ttl), runtime_ttl: options.fetch(:runtime_ttl))
+        end
         data = super.merge(JobMetadata::KEY => metadata)
         @runtime_retry_request ? JobMetadata.with_redelivery(data) : data
       end

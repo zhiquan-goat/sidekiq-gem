@@ -22,6 +22,10 @@ module ActiveJob
       end
 
       def enqueue_all(jobs)
+        if jobs.any?(&:runtime_uniqueness_options)
+          raise SidekiqUniqueness::UnsupportedBulk, 'Unique Active Job bulk is not supported; enqueue jobs individually'
+        end
+
         # Same per-job results and error handling as AJ's adapter fallback.
         # No callbacks, transaction deferral, or cross-adapter atomicity.
         jobs.each do |job|
